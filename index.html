@@ -213,7 +213,7 @@ function parseReceiptText(rawText){
     fecha = `${d.padStart(2,"0")}/${m.padStart(2,"0")}/${y}`;
   }
 
-  let total = findLastByKeywords([/TOTAL A PAGAR/, /IMPORTE TOTAL/, /^TOTAL\b/, /\bTOTAL\b/]);
+  let total = findLastByKeywords([/TOTAL A PAGAR/, /IMPORTE TOTAL/, /TOTAL EUR/, /A PAGAR/, /^TOTAL\b/, /\bTOTAL\b/]);
   let totalConfident = total !== null;
   if (total === null) {
     const all = [...rawText.matchAll(new RegExp(moneyToken.source, "g"))].map((m) => parseMoneyToken(m[1])).filter((n) => n !== null && n > 0);
@@ -509,7 +509,7 @@ function App(){
       const ocrCanvas = await prepareOCRCanvasFromFile(file);
       const text = await runOCR(ocrCanvas);
       const extracted = parseReceiptText(text);
-      setForm({ ...mapExtractedToForm(extracted, lastContext), base64, thumb });
+      setForm({ ...mapExtractedToForm(extracted, lastContext), base64, thumb, ocrText: text });
     } catch (err) {
       console.error(err);
       setError("No se ha podido leer el ticket automáticamente. Revisa los datos o complétalos a mano.");
@@ -562,7 +562,7 @@ function App(){
       const ocrCanvas = await prepareOCRCanvasFromDataURL("data:image/jpeg;base64," + rotated);
       const text = await runOCR(ocrCanvas);
       const extracted = parseReceiptText(text);
-      setForm({ ...mapExtractedToForm(extracted, form), base64: rotated, thumb: newThumb });
+      setForm({ ...mapExtractedToForm(extracted, form), base64: rotated, thumb: newThumb, ocrText: text });
     } catch (err) { console.error(err); setError("No se ha podido releer la imagen rotada."); }
     finally { setRotating(false); }
   };
@@ -714,6 +714,7 @@ function App(){
           <div>
             <h2 className="ledger-font" style={{ fontSize:19, margin:"0 0 4px" }}>Escanear ticket</h2>
             <p className="hint">Haz una foto del ticket o factura. El reconocimiento de texto se ejecuta en tu propio navegador (no se envía a ningún servidor) y rellenará los datos para que los revises antes de guardar.</p>
+            <p className="hint" style={{ marginTop:-10 }}>Consejo: con buena luz, el ticket bien plano (no arrugado) y ocupando la mayor parte de la foto, el lector acierta mucho más.</p>
             {!ocrReady && !form && <p className="hint" style={{ color:"#A6622B" }}>Preparando el lector de texto (la primera vez puede tardar unos segundos)…</p>}
 
             {!form && !scanning && (
@@ -994,6 +995,7 @@ function App(){
 }
 
 function ExpenseForm({ form, setForm, editId, error, queue, queueTotal, rotating, onRotate, onCalcIVA, onSave, onDiscard, openWallets }){
+  const [showDebug, setShowDebug] = useState(false);
   return (
     <div className="card receipt" style={{ padding:18, marginBottom:24, paddingBottom:26 }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:12 }}>
@@ -1007,9 +1009,19 @@ function ExpenseForm({ form, setForm, editId, error, queue, queueTotal, rotating
       {form.thumb && (
         <div style={{ marginBottom:14 }}>
           <img src={form.thumb} alt="ticket" style={{ maxHeight:150, borderRadius:4, border:"1px solid #D8D4C5", display:"block", marginBottom:6 }} />
-          {form.base64 && <button onClick={onRotate} disabled={rotating} className="focus-ring" style={{ background:"none", border:"none", color:"#2F6B4F", fontSize:12, fontWeight:600, cursor:"pointer", padding:0 }}>
+          {form.base64 && <button onClick={onRotate} disabled={rotating} className="focus-ring" style={{ background:"none", border:"none", color:"#2F6B4F", fontSize:12, fontWeight:600, cursor:"pointer", padding:0, marginRight:14 }}>
             {rotating ? "Rotando y releyendo…" : "↻ La foto está torcida: rotar y releer"}
           </button>}
+          {form.ocrText !== undefined && (
+            <button onClick={() => setShowDebug((s) => !s)} className="focus-ring" style={{ background:"none", border:"none", color:"#7A7660", fontSize:12, fontWeight:600, cursor:"pointer", padding:0, textDecoration:"underline" }}>
+              {showDebug ? "Ocultar texto leído" : "🔍 Ver texto leído por el lector"}
+            </button>
+          )}
+          {showDebug && (
+            <pre style={{ background:"#1C2B22", color:"#9FD6B5", fontSize:11, padding:10, borderRadius:6, marginTop:8, maxHeight:180, overflow:"auto", whiteSpace:"pre-wrap" }}>
+              {form.ocrText || "(sin texto)"}
+            </pre>
+          )}
         </div>
       )}
 
