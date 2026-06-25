@@ -1,0 +1,1079 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Libro de gastos · Federación Asturiana de Voleibol</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,500;0,600;0,700;1,500&family=Source+Sans+3:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:'Source Sans 3', system-ui, sans-serif; background:#EDEBE3; color:#1C2B22; }
+  .ledger-font { font-family:'Newsreader', serif; }
+  .mono { font-family:'IBM Plex Mono', monospace; }
+  ::placeholder { color:#A6A18C; }
+  input, select, textarea { font-family: inherit; }
+  button { font-family: inherit; }
+  .stamp { display:inline-block; border:1.5px solid currentColor; border-radius:3px; padding:1px 7px; font-size:11px; letter-spacing:.04em; text-transform:uppercase; font-weight:600; transform:rotate(-1.5deg); }
+  .card { background:#FBFAF6; border:1px solid #D8D4C5; border-radius:6px; position:relative; }
+  .card.receipt::after { content:""; position:absolute; left:0; right:0; bottom:-1px; height:6px; background-image:radial-gradient(circle at 6px 0, transparent 4px, #EDEBE3 4.5px); background-size:12px 6px; background-repeat:repeat-x; }
+  .hint { font-size:12.5px; color:#7A7660; margin:2px 0 16px; line-height:1.45; }
+  .focus-ring:focus { outline:2px solid #2F6B4F; outline-offset:1px; }
+  .shell { min-height:100vh; padding-bottom:74px; }
+  .tabbar { position:fixed; bottom:0; left:0; right:0; background:#1C2B22; display:flex; box-shadow:0 -2px 10px rgba(0,0,0,.15); z-index:10; }
+  .tabbtn { flex:1; background:none; border:none; color:#9FB0A0; padding:9px 4px 10px; font-size:11px; font-weight:600; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:2px; }
+  .tabbtn.active { color:#FBFAF6; }
+  .tabbtn .ic { font-size:18px; }
+  @media print { .no-print { display:none !important; } body { background:#fff; } }
+  @page { margin: 14mm; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.0.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.0.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.28.4/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@6/dist/tesseract.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const CATEGORIES = ["Desplazamiento","Dietas","Alojamiento","Material deportivo","Arbitraje","Inscripciones","Otros"];
+const CATEGORY_COLOR = {
+  "Desplazamiento":"#2F6B4F","Dietas":"#A6622B","Alojamiento":"#3A5A7A","Material deportivo":"#6B4F8A",
+  "Arbitraje":"#8A3A3A","Inscripciones":"#4F6B6B","Otros":"#6B6B5F",
+};
+const FINANCIACIONES = ["Fondos propios","Subvención pública","Cuotas e inscripciones","Otro"];
+const FORMAS_PAGO = ["Tarjeta","Transferencia","Efectivo","Anticipo de caja"];
+
+const EMPTY_FORM = {
+  fecha:"", proveedor:"", nif:"", concepto:"", categoria:"Otros", evento:"",
+  financiacion:"Fondos propios", convocatoria:"", forma_pago:"Tarjeta", carteraId:"",
+  base_imponible:"", iva_porcentaje:"", iva_importe:"", total:"", num_factura:"",
+  dudoso:false, base64:null, thumb:null,
+};
+
+const CATEGORY_KEYWORDS = {
+  "Desplazamiento": ["GASOLINA","GASOLINERA","REPSOL","CEPSA","SHELL","PEAJE","AUTOPISTA","PARKING","APARCAMIENTO","TAXI","UBER","CABIFY","RENFE","AUTOBUS","ALSA","AUTOCAR"],
+  "Alojamiento": ["HOTEL","HOSTAL","APARTAHOTEL","PENSION","ALBERGUE","BOOKING"],
+  "Dietas": ["RESTAURANTE","CAFETERIA","MENU DEL DIA","SIDRERIA","MESON","PIZZERIA","CHIGRE"],
+  "Material deportivo": ["DECATHLON","DEPORTES","VOLEIBOL","VOLLEY","MERCURY","ASICS","MIZUNO"],
+  "Arbitraje": ["ARBITRO","ARBITROS","COLEGIO DE ARBITROS"],
+  "Inscripciones": ["INSCRIPCION","FEDERACION","LICENCIA DEPORTIVA"],
+};
+
+function uid(){ return "g_" + Date.now() + "_" + Math.random().toString(36).slice(2,8); }
+function toNum(v){ if(v===null||v===undefined||v==="") return null; const n = typeof v==="number"?v:parseFloat(String(v).replace(",", ".")); return Number.isFinite(n)?n:null; }
+function round2(n){ return Math.round(n*100)/100; }
+function fmtEUR(n){ if(n===null||n===undefined||Number.isNaN(n)) return "—"; return n.toLocaleString("es-ES",{minimumFractionDigits:2,maximumFractionDigits:2}) + " €"; }
+function parseFechaDMY(str){ if(!str) return null; const m=String(str).match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/); if(!m) return null; const d=new Date(parseInt(m[3],10), parseInt(m[2],10)-1, parseInt(m[1],10)); return Number.isNaN(d.getTime())?null:d; }
+
+function compressImage(file, maxWidth=900, quality=0.72){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxWidth) { height = Math.round((height*maxWidth)/width); width = maxWidth; }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality).split(",")[1]);
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+function thumbFromBase64(base64, maxWidth=220, quality=0.5){
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxWidth) { height = Math.round((height*maxWidth)/width); width = maxWidth; }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => resolve(null);
+    img.src = "data:image/jpeg;base64," + base64;
+  });
+}
+function rotateBase64(base64){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.height; canvas.height = img.width;
+      const ctx = canvas.getContext("2d");
+      ctx.translate(canvas.width/2, canvas.height/2);
+      ctx.rotate(Math.PI/2);
+      ctx.drawImage(img, -img.width/2, -img.height/2);
+      resolve(canvas.toDataURL("image/jpeg", 0.72).split(",")[1]);
+    };
+    img.onerror = reject;
+    img.src = "data:image/jpeg;base64," + base64;
+  });
+}
+
+function loadImageFromFile(file){
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+function loadImageFromDataURL(dataURL){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = dataURL;
+  });
+}
+function buildOCRCanvas(img, maxDim=1600){
+  let { width, height } = img;
+  let scale = Math.min(1, maxDim/Math.max(width, height));
+  let tw = Math.round(width*scale), th = Math.round(height*scale);
+  if (Math.max(tw, th) < 900) { const up = 900/Math.max(tw, th); tw = Math.round(tw*up); th = Math.round(th*up); }
+  const canvas = document.createElement("canvas");
+  canvas.width = tw; canvas.height = th;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, tw, th);
+  const imgData = ctx.getImageData(0, 0, tw, th);
+  const d = imgData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    let v = (gray - 128) * 1.35 + 128;
+    v = v < 0 ? 0 : v > 255 ? 255 : v;
+    d[i] = d[i+1] = d[i+2] = v;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas;
+}
+async function prepareOCRCanvasFromFile(file){ const img = await loadImageFromFile(file); return buildOCRCanvas(img); }
+async function prepareOCRCanvasFromDataURL(dataURL){ const img = await loadImageFromDataURL(dataURL); return buildOCRCanvas(img); }
+
+async function getWorkerInstance(){
+  if (!window.__ocrWorkerPromise) window.__ocrWorkerPromise = Tesseract.createWorker("spa");
+  return window.__ocrWorkerPromise;
+}
+async function runOCR(canvas){
+  const worker = await getWorkerInstance();
+  const { data } = await worker.recognize(canvas);
+  return data.text || "";
+}
+
+function parseMoneyToken(tok){
+  if (!tok) return null;
+  let s = tok.trim();
+  const hasComma = s.includes(","), hasDot = s.includes(".");
+  if (hasComma && hasDot) s = s.replace(/\./g, "").replace(",", ".");
+  else if (hasComma && !hasDot) s = s.replace(",", ".");
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseReceiptText(rawText){
+  const lines = rawText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const stripAccents = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const normLines = lines.map((l) => stripAccents(l).toUpperCase());
+  const moneyToken = /(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\b/;
+
+  function moneyOnLine(idx){
+    if (idx < 0 || idx >= lines.length) return null;
+    const m = lines[idx].match(moneyToken);
+    return m ? parseMoneyToken(m[1]) : null;
+  }
+  function findLastByKeywords(regexes){
+    for (let i = lines.length - 1; i >= 0; i--) {
+      for (const re of regexes) {
+        if (re.test(normLines[i])) {
+          let amt = moneyOnLine(i);
+          if (amt === null) amt = moneyOnLine(i + 1);
+          if (amt !== null) return amt;
+        }
+      }
+    }
+    return null;
+  }
+
+  let fecha = "";
+  const dm = rawText.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+  if (dm) {
+    let [, d, m, y] = dm;
+    if (y.length === 2) y = (parseInt(y, 10) > 50 ? "19" : "20") + y;
+    fecha = `${d.padStart(2,"0")}/${m.padStart(2,"0")}/${y}`;
+  }
+
+  let total = findLastByKeywords([/TOTAL A PAGAR/, /IMPORTE TOTAL/, /^TOTAL\b/, /\bTOTAL\b/]);
+  let totalConfident = total !== null;
+  if (total === null) {
+    const all = [...rawText.matchAll(new RegExp(moneyToken.source, "g"))].map((m) => parseMoneyToken(m[1])).filter((n) => n !== null && n > 0);
+    if (all.length) { total = Math.max(...all); totalConfident = false; }
+  }
+
+  const base = findLastByKeywords([/BASE IMPONIBLE/, /\bBASE\b/]);
+  const ivaPctMatch = rawText.match(/I\.?V\.?A\.?[^\d%]{0,8}(\d{1,2}(?:[.,]\d+)?)\s*%/i);
+  const ivaPct = ivaPctMatch ? parseFloat(ivaPctMatch[1].replace(",", ".")) : null;
+  const ivaImporte = findLastByKeywords([/CUOTA IVA/, /IVA IMPORTE/]);
+
+  const nifMatch = rawText.match(/\b([A-Za-z][0-9]{7}[0-9A-Za-z]|[0-9]{8}[A-Za-z])\b/);
+  const nif = nifMatch ? nifMatch[1].toUpperCase() : "";
+
+  const facturaMatch = rawText.match(/(?:FACTURA|TICKET)\s*N?[ºO°]?\.?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-\/]{2,})/i);
+  const numFactura = facturaMatch ? facturaMatch[1] : "";
+
+  let proveedor = "";
+  for (let i = 0; i < Math.min(6, lines.length); i++) {
+    const l = lines[i];
+    if (l.length >= 3 && /[A-Za-zÁÉÍÓÚÑáéíóúñ]{3,}/.test(l) && !/^\d{1,2}[\/\-.]/.test(l) && !moneyToken.test(l)) { proveedor = l; break; }
+  }
+
+  const fullNorm = normLines.join(" ");
+  let categoria = "Otros";
+  for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
+    if (kws.some((k) => fullNorm.includes(k))) { categoria = cat; break; }
+  }
+
+  const concepto = proveedor ? `Compra en ${proveedor}` : "";
+  const dudoso = !fecha || total === null || !totalConfident;
+
+  return { fecha, proveedor, nif, concepto, categoria, base_imponible: base, iva_porcentaje: ivaPct, iva_importe: ivaImporte, total, num_factura: numFactura, dudoso };
+}
+
+function mapExtractedToForm(extracted, defaults){
+  defaults = defaults || {};
+  return {
+    fecha: extracted.fecha || "", proveedor: extracted.proveedor || "", nif: extracted.nif || "",
+    concepto: extracted.concepto || "",
+    categoria: CATEGORIES.includes(extracted.categoria) ? extracted.categoria : "Otros",
+    evento: defaults.evento || "",
+    financiacion: defaults.financiacion || "Fondos propios",
+    convocatoria: defaults.convocatoria || "",
+    forma_pago: defaults.forma_pago || "Tarjeta",
+    carteraId: defaults.carteraId || "",
+    base_imponible: extracted.base_imponible ?? "", iva_porcentaje: extracted.iva_porcentaje ?? "",
+    iva_importe: extracted.iva_importe ?? "", total: extracted.total ?? "",
+    num_factura: extracted.num_factura || "", dudoso: !!extracted.dudoso,
+  };
+}
+
+function nextSeq(){
+  const cur = parseInt(localStorage.getItem("fave_gastos_seq") || "0", 10);
+  const next = cur + 1;
+  localStorage.setItem("fave_gastos_seq", String(next));
+  return next;
+}
+function loadExpenses(){ try { const raw = localStorage.getItem("fave_gastos_v1"); return raw ? JSON.parse(raw) : []; } catch (_) { return []; } }
+function saveExpenses(list){ localStorage.setItem("fave_gastos_v1", JSON.stringify(list)); }
+function loadCarteras(){ try { const raw = localStorage.getItem("fave_carteras_v1"); return raw ? JSON.parse(raw) : []; } catch (_) { return []; } }
+function saveCarteras(list){ localStorage.setItem("fave_carteras_v1", JSON.stringify(list)); }
+
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function buildXLSX(list, carteras){
+  const sorted = list.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0));
+  const carteraName = (id) => (carteras.find((c) => c.id === id) || {}).nombre || "";
+  const headerDetail = ["Nº","Fecha","Proveedor","NIF","Concepto","Categoría","Evento","Financiación","Convocatoria","Forma de pago","Cartera","Base imponible","IVA %","IVA importe","Total","Núm. factura"];
+  const dataRows = sorted.map((x) => [
+    x.seq || "", x.fecha || "", x.proveedor || "", x.nif || "", x.concepto || "", x.categoria || "",
+    x.evento || "", x.financiacion || "", x.convocatoria || "", x.forma_pago || "", carteraName(x.carteraId),
+    x.base_imponible ?? "", x.iva_porcentaje ?? "", x.iva_importe ?? "", x.total ?? 0, x.num_factura || "",
+  ]);
+  const sumBase = sorted.reduce((s, x) => s + (x.base_imponible || 0), 0);
+  const sumIva = sorted.reduce((s, x) => s + (x.iva_importe || 0), 0);
+  const sumTotal = sorted.reduce((s, x) => s + (x.total || 0), 0);
+  const totalRow = ["","","","","","","","","","","",round2(sumBase),"",round2(sumIva),round2(sumTotal),""];
+  const wsDetail = XLSX.utils.aoa_to_sheet([headerDetail, ...dataRows, totalRow]);
+  wsDetail["!cols"] = [{wch:5},{wch:11},{wch:20},{wch:13},{wch:24},{wch:15},{wch:14},{wch:16},{wch:18},{wch:13},{wch:14},{wch:12},{wch:7},{wch:11},{wch:11},{wch:13}];
+
+  const byCat = CATEGORIES.map((c) => { const items = list.filter((x) => x.categoria === c); return [c, items.length, round2(items.reduce((s, x) => s + (x.total || 0), 0))]; }).filter((r) => r[1] > 0);
+  const wsSummary = XLSX.utils.aoa_to_sheet([["Categoría","Nº gastos","Total"], ...byCat, ["TOTAL", list.length, round2(sumTotal)]]);
+  wsSummary["!cols"] = [{wch:20},{wch:12},{wch:12}];
+
+  const byFin = FINANCIACIONES.map((f) => { const items = list.filter((x) => x.financiacion === f); return [f, items.length, round2(items.reduce((s, x) => s + (x.total || 0), 0))]; }).filter((r) => r[1] > 0);
+  const wsFin = XLSX.utils.aoa_to_sheet([["Financiación","Nº gastos","Total"], ...byFin, ["TOTAL", list.length, round2(sumTotal)]]);
+  wsFin["!cols"] = [{wch:22},{wch:12},{wch:12}];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsDetail, "Detalle");
+  XLSX.utils.book_append_sheet(wb, wsSummary, "Resumen categoría");
+  XLSX.utils.book_append_sheet(wb, wsFin, "Por financiación");
+  return XLSX.write(wb, { bookType:"xlsx", type:"array" });
+}
+
+function ReportView({ list, description, onClose }){
+  const sorted = list.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0));
+  const total = sorted.reduce((s, x) => s + (x.total || 0), 0);
+  const byFin = FINANCIACIONES.map((f) => { const items = sorted.filter((x) => x.financiacion === f); return { f, count: items.length, sum: items.reduce((s, x) => s + (x.total || 0), 0) }; }).filter((b) => b.count > 0);
+  return (
+    <div style={{ fontFamily:"'Source Sans 3', system-ui, sans-serif", background:"#fff", minHeight:"100vh", color:"#1C2B22", padding:"24px 18px" }}>
+      <div className="no-print" style={{ marginBottom:18, display:"flex", gap:10 }}>
+        <button onClick={onClose} style={ghostBtn}>← Volver</button>
+        <button onClick={() => window.print()} style={primaryBtn}>Imprimir / Guardar PDF</button>
+      </div>
+      <div style={{ borderBottom:"2px solid #1C2B22", paddingBottom:10, marginBottom:14 }}>
+        <div style={{ fontSize:11, textTransform:"uppercase", letterSpacing:".05em", color:"#7A7660" }}>Federación Asturiana de Voleibol</div>
+        <h1 className="ledger-font" style={{ fontSize:22, margin:"2px 0 0" }}>Informe de gastos</h1>
+        <div style={{ fontSize:12, color:"#7A7660", marginTop:4 }}>{description} · Generado el {new Date().toLocaleDateString("es-ES")}</div>
+      </div>
+
+      {byFin.length > 0 && (
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, marginBottom:18 }}>
+          <thead><tr style={{ borderBottom:"1.5px solid #1C2B22", textAlign:"left" }}><th style={{ padding:"4px" }}>Financiación</th><th style={{ padding:"4px" }}>Nº gastos</th><th style={{ padding:"4px", textAlign:"right" }}>Importe</th></tr></thead>
+          <tbody>{byFin.map((b) => (<tr key={b.f} style={{ borderBottom:"1px solid #D8D4C5" }}><td style={{ padding:"4px" }}>{b.f}</td><td style={{ padding:"4px" }}>{b.count}</td><td style={{ padding:"4px", textAlign:"right" }} className="mono">{fmtEUR(b.sum)}</td></tr>))}</tbody>
+        </table>
+      )}
+
+      <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11.5 }}>
+        <thead>
+          <tr style={{ borderBottom:"1.5px solid #1C2B22", textAlign:"left" }}>
+            <th style={{ padding:"4px" }}>Nº</th><th style={{ padding:"4px" }}>Fecha</th><th style={{ padding:"4px" }}>Proveedor</th>
+            <th style={{ padding:"4px" }}>Concepto</th><th style={{ padding:"4px" }}>Categoría / Evento</th>
+            <th style={{ padding:"4px" }}>Financiación</th><th style={{ padding:"4px", textAlign:"right" }}>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((x) => (
+            <tr key={x.id} style={{ borderBottom:"1px solid #D8D4C5" }}>
+              <td style={{ padding:"4px" }}>{x.seq ? String(x.seq).padStart(3,"0") : "—"}</td>
+              <td style={{ padding:"4px" }}>{x.fecha || "—"}</td>
+              <td style={{ padding:"4px" }}>{x.proveedor || "—"}</td>
+              <td style={{ padding:"4px" }}>{x.concepto || "—"}</td>
+              <td style={{ padding:"4px" }}>{x.categoria}{x.evento ? <div style={{ fontSize:10, color:"#7A7660" }}>{x.evento}</div> : null}</td>
+              <td style={{ padding:"4px" }}>{x.financiacion}</td>
+              <td style={{ padding:"4px", textAlign:"right" }} className="mono">{fmtEUR(x.total)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ display:"flex", justifyContent:"flex-end", marginTop:10, fontSize:14, fontWeight:700 }}><div className="mono">TOTAL: {fmtEUR(total)}</div></div>
+
+      <p style={{ fontSize:11.5, color:"#3A3A30", marginTop:34, lineHeight:1.5 }}>
+        Quien suscribe certifica que los gastos relacionados en el presente documento corresponden a la actividad federativa indicada,
+        han sido efectivamente abonados y se conservan los justificantes originales (facturas y tickets) a disposición de los
+        organismos de control que pudieran requerirlos.
+      </p>
+      <div style={{ marginTop:46, display:"flex", justifyContent:"space-between", fontSize:12 }}>
+        <div>Fecha: ____ / ____ / ________</div>
+      </div>
+      <div style={{ marginTop:50, display:"flex", justifyContent:"space-between", fontSize:12 }}>
+        <div>Fdo.: Responsable del gasto<br /><br />___________________________</div>
+        <div>Vº Bº Dirección Técnica<br /><br />___________________________</div>
+      </div>
+    </div>
+  );
+}
+
+function LiquidacionView({ wallet, expensesAsignados, onClose }){
+  const sorted = expensesAsignados.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0));
+  const justificado = sorted.reduce((s, x) => s + (x.total || 0), 0);
+  const diff = round2(wallet.importe - justificado);
+  const diffLabel = diff > 0.004 ? "A devolver a la federación" : diff < -0.004 ? "A reponer al seleccionador/a" : "Sin diferencia";
+  return (
+    <div style={{ fontFamily:"'Source Sans 3', system-ui, sans-serif", background:"#fff", minHeight:"100vh", color:"#1C2B22", padding:"24px 18px" }}>
+      <div className="no-print" style={{ marginBottom:18, display:"flex", gap:10 }}>
+        <button onClick={onClose} style={ghostBtn}>← Volver</button>
+        <button onClick={() => window.print()} style={primaryBtn}>Imprimir / Guardar PDF</button>
+      </div>
+      <div style={{ borderBottom:"2px solid #1C2B22", paddingBottom:10, marginBottom:16 }}>
+        <div style={{ fontSize:11, textTransform:"uppercase", letterSpacing:".05em", color:"#7A7660" }}>Federación Asturiana de Voleibol</div>
+        <h1 className="ledger-font" style={{ fontSize:22, margin:"2px 0 0" }}>Liquidación de anticipo de caja fija</h1>
+      </div>
+      <table style={{ fontSize:13, marginBottom:18 }}>
+        <tbody>
+          <tr><td style={{ padding:"3px 14px 3px 0", color:"#7A7660" }}>Responsable</td><td style={{ fontWeight:600 }}>{wallet.nombre}</td></tr>
+          <tr><td style={{ padding:"3px 14px 3px 0", color:"#7A7660" }}>Expedición / evento</td><td>{wallet.evento || "—"}</td></tr>
+          <tr><td style={{ padding:"3px 14px 3px 0", color:"#7A7660" }}>Fecha de entrega del anticipo</td><td>{wallet.fecha || "—"}</td></tr>
+          <tr><td style={{ padding:"3px 14px 3px 0", color:"#7A7660" }}>Importe del anticipo</td><td className="mono" style={{ fontWeight:700 }}>{fmtEUR(wallet.importe)}</td></tr>
+        </tbody>
+      </table>
+      <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+        <thead><tr style={{ borderBottom:"1.5px solid #1C2B22", textAlign:"left" }}><th style={{ padding:"4px" }}>Nº</th><th style={{ padding:"4px" }}>Fecha</th><th style={{ padding:"4px" }}>Proveedor</th><th style={{ padding:"4px" }}>Concepto</th><th style={{ padding:"4px" }}>Categoría</th><th style={{ padding:"4px", textAlign:"right" }}>Total</th></tr></thead>
+        <tbody>
+          {sorted.map((x) => (
+            <tr key={x.id} style={{ borderBottom:"1px solid #D8D4C5" }}>
+              <td style={{ padding:"4px" }}>{x.seq ? String(x.seq).padStart(3,"0") : "—"}</td>
+              <td style={{ padding:"4px" }}>{x.fecha || "—"}</td><td style={{ padding:"4px" }}>{x.proveedor || "—"}</td>
+              <td style={{ padding:"4px" }}>{x.concepto || "—"}</td><td style={{ padding:"4px" }}>{x.categoria}</td>
+              <td style={{ padding:"4px", textAlign:"right" }} className="mono">{fmtEUR(x.total)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ marginTop:18, marginLeft:"auto", width:280, fontSize:13 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", padding:"3px 0" }}><span>Anticipo recibido</span><span className="mono">{fmtEUR(wallet.importe)}</span></div>
+        <div style={{ display:"flex", justifyContent:"space-between", padding:"3px 0" }}><span>Total justificado</span><span className="mono">{fmtEUR(justificado)}</span></div>
+        <div style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderTop:"1.5px solid #1C2B22", fontWeight:700 }}><span>{diffLabel}</span><span className="mono">{fmtEUR(Math.abs(diff))}</span></div>
+      </div>
+      <div style={{ marginTop:60, display:"flex", justifyContent:"space-between", fontSize:12 }}>
+        <div>Fdo.: Seleccionador/a<br /><br />___________________________</div>
+        <div>Fdo.: Tesorería / Administración<br /><br />___________________________</div>
+      </div>
+    </div>
+  );
+}
+
+const labelStyle = { display:"block", fontSize:11, color:"#7A7660", marginBottom:3, textTransform:"uppercase", letterSpacing:".03em" };
+const inputStyle = { width:"100%", padding:"8px 9px", borderRadius:6, border:"1px solid #D8D4C5", fontSize:14, background:"#FFFFFF", color:"#1C2B22", boxSizing:"border-box" };
+const primaryBtn = { background:"#1C2B22", color:"#EDEBE3", border:"none", borderRadius:8, padding:"10px 16px", fontSize:14, fontWeight:700, cursor:"pointer" };
+const ghostBtn = { background:"transparent", color:"#1C2B22", border:"1.5px solid #1C2B22", borderRadius:8, padding:"10px 16px", fontSize:14, fontWeight:600, cursor:"pointer" };
+const linkBtn = { background:"none", border:"none", fontSize:12, fontWeight:600, color:"#2F6B4F", cursor:"pointer", padding:0 };
+
+function Field({ label, value, onChange, placeholder, full, mono, bold }){
+  return (
+    <div style={full ? { gridColumn:"1 / -1" } : undefined}>
+      <label style={labelStyle}>{label}</label>
+      <input className="focus-ring" value={value ?? ""} placeholder={placeholder} onChange={(e) => onChange(e.target.value)}
+        style={{ ...inputStyle, fontFamily: mono ? "'IBM Plex Mono', monospace" : "inherit", fontWeight: bold ? 700 : 400 }} />
+    </div>
+  );
+}
+
+const TABS = [
+  { key:"scan", label:"Escanear", icon:"📷" },
+  { key:"gastos", label:"Gastos", icon:"🧾" },
+  { key:"carteras", label:"Carteras", icon:"👜" },
+  { key:"informes", label:"Informes", icon:"📊" },
+];
+
+function App(){
+  const [tab, setTab] = useState("scan");
+  const [expenses, setExpenses] = useState([]);
+  const [carteras, setCarteras] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [ocrReady, setOcrReady] = useState(false);
+
+  const [scanning, setScanning] = useState(false);
+  const [pendingPreview, setPendingPreview] = useState(null);
+  const [rotating, setRotating] = useState(false);
+  const [form, setForm] = useState(null);
+  const [editId, setEditId] = useState(null);
+  const [error, setError] = useState("");
+  const [dupWarning, setDupWarning] = useState("");
+  const [lastSaved, setLastSaved] = useState(null);
+  const [lastContext, setLastContext] = useState({ evento:"", financiacion:"Fondos propios", convocatoria:"", forma_pago:"Tarjeta", carteraId:"" });
+
+  const [filter, setFilter] = useState("Todas");
+  const [eventoFilter, setEventoFilter] = useState("Todos");
+  const [finFilter, setFinFilter] = useState("Todas");
+  const [search, setSearch] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [queue, setQueue] = useState([]);
+  const [queueTotal, setQueueTotal] = useState(0);
+  const [undoData, setUndoData] = useState(null);
+  const [showReport, setShowReport] = useState(false);
+
+  const [walletForm, setWalletForm] = useState(null);
+  const [showLiquidacion, setShowLiquidacion] = useState(null);
+
+  const fileInputRef = useRef(null);
+  const batchInputRef = useRef(null);
+  const restoreInputRef = useRef(null);
+  const undoTimerRef = useRef(null);
+  const dupTimerRef = useRef(null);
+
+  useEffect(() => {
+    setExpenses(loadExpenses().sort((a, b) => (b.created || 0) - (a.created || 0)));
+    setCarteras(loadCarteras());
+    setLoaded(true);
+    getWorkerInstance().then(() => setOcrReady(true)).catch(() => {});
+  }, []);
+
+  const persistExpenses = (list) => { saveExpenses(list); setExpenses(list); };
+  const persistCarteras = (list) => { saveCarteras(list); setCarteras(list); };
+
+  const processSingleFile = useCallback(async (file) => {
+    setError(""); setScanning(true); setForm(null); setEditId(null);
+    let base64 = null, thumb = null;
+    try { base64 = await compressImage(file); thumb = await thumbFromBase64(base64); setPendingPreview(thumb); }
+    catch (_) { setScanning(false); setError("No se ha podido procesar la imagen."); return; }
+    try {
+      const ocrCanvas = await prepareOCRCanvasFromFile(file);
+      const text = await runOCR(ocrCanvas);
+      const extracted = parseReceiptText(text);
+      setForm({ ...mapExtractedToForm(extracted, lastContext), base64, thumb });
+    } catch (err) {
+      console.error(err);
+      setError("No se ha podido leer el ticket automáticamente. Revisa los datos o complétalos a mano.");
+      setForm({ ...EMPTY_FORM, ...lastContext, base64, thumb });
+    } finally { setScanning(false); }
+  }, [lastContext]);
+
+  const afterFormResolved = useCallback(async () => {
+    if (queue.length > 0) {
+      const next = queue[0]; const rest = queue.slice(1);
+      setQueue(rest); setForm(null); setEditId(null); setPendingPreview(null); setError("");
+      await processSingleFile(next);
+    } else {
+      setForm(null); setEditId(null); setQueueTotal(0); setPendingPreview(null); setError("");
+    }
+  }, [queue, processSingleFile]);
+
+  const handleSingleCapture = (e) => {
+    const file = e.target.files?.[0]; e.target.value = "";
+    if (!file) return;
+    setLastSaved(null); setQueue([]); setQueueTotal(0); processSingleFile(file);
+  };
+  const handleBatchSelect = (e) => {
+    const files = Array.from(e.target.files || []); e.target.value = "";
+    if (files.length === 0) return;
+    setLastSaved(null); setQueueTotal(files.length); setQueue(files.slice(1)); processSingleFile(files[0]);
+  };
+  const openManual = () => {
+    setError(""); setLastSaved(null); setQueue([]); setQueueTotal(0); setPendingPreview(null); setEditId(null);
+    setForm({ ...EMPTY_FORM, ...lastContext });
+  };
+  const openEdit = (exp) => {
+    setError(""); setTab("gastos"); setEditId(exp.id);
+    setForm({
+      fecha: exp.fecha || "", proveedor: exp.proveedor || "", nif: exp.nif || "", concepto: exp.concepto || "",
+      categoria: exp.categoria || "Otros", evento: exp.evento || "", financiacion: exp.financiacion || "Fondos propios",
+      convocatoria: exp.convocatoria || "", forma_pago: exp.forma_pago || "Tarjeta", carteraId: exp.carteraId || "",
+      base_imponible: exp.base_imponible ?? "", iva_porcentaje: exp.iva_porcentaje ?? "", iva_importe: exp.iva_importe ?? "",
+      total: exp.total ?? "", num_factura: exp.num_factura || "", dudoso: !!exp.dudoso, base64: null, thumb: exp.thumb || null,
+    });
+  };
+  const discardForm = async () => { await afterFormResolved(); };
+
+  const rotateAndReread = async () => {
+    if (!form?.base64) return;
+    setRotating(true); setError("");
+    try {
+      const rotated = await rotateBase64(form.base64);
+      const newThumb = await thumbFromBase64(rotated);
+      const ocrCanvas = await prepareOCRCanvasFromDataURL("data:image/jpeg;base64," + rotated);
+      const text = await runOCR(ocrCanvas);
+      const extracted = parseReceiptText(text);
+      setForm({ ...mapExtractedToForm(extracted, form), base64: rotated, thumb: newThumb });
+    } catch (err) { console.error(err); setError("No se ha podido releer la imagen rotada."); }
+    finally { setRotating(false); }
+  };
+
+  const calcIVA = () => {
+    const base = toNum(form.base_imponible), pct = toNum(form.iva_porcentaje);
+    if (base === null || pct === null) { setError("Para calcular el IVA necesitas la base imponible y el % de IVA."); return; }
+    const importe = round2((base*pct)/100), total = round2(base + importe);
+    setError(""); setForm({ ...form, iva_importe: importe, total });
+  };
+
+  const saveForm = async () => {
+    if (toNum(form.total) === null) { setError("Indica al menos el importe total antes de guardar."); return; }
+    setError("");
+    const prevSeq = editId ? expenses.find((x) => x.id === editId)?.seq : null;
+    const seq = prevSeq || nextSeq();
+    const record = {
+      id: editId || uid(), created: editId ? (expenses.find((x) => x.id === editId)?.created || Date.now()) : Date.now(), seq,
+      fecha: form.fecha, proveedor: form.proveedor, nif: form.nif, concepto: form.concepto, categoria: form.categoria,
+      evento: form.evento || "", financiacion: form.financiacion || "Fondos propios", convocatoria: form.convocatoria || "",
+      forma_pago: form.forma_pago || "Tarjeta", carteraId: form.carteraId || "",
+      base_imponible: toNum(form.base_imponible), iva_porcentaje: toNum(form.iva_porcentaje), iva_importe: toNum(form.iva_importe),
+      total: toNum(form.total) ?? 0, num_factura: form.num_factura, dudoso: !!form.dudoso, thumb: form.thumb || null,
+    };
+    const dup = expenses.find((x) => x.id !== record.id && record.fecha && x.fecha === record.fecha && Math.abs((x.total || 0) - record.total) < 0.01);
+    const without = expenses.filter((x) => x.id !== record.id);
+    const newList = [record, ...without].sort((a, b) => (b.created || 0) - (a.created || 0));
+    persistExpenses(newList);
+    setLastContext({ evento: record.evento, financiacion: record.financiacion, convocatoria: record.convocatoria, forma_pago: record.forma_pago, carteraId: record.carteraId });
+    if (dup) {
+      setDupWarning(`Aviso: ya existe un gasto de ${fmtEUR(record.total)} el ${record.fecha} (${dup.proveedor || "sin proveedor"}). Comprueba que no sea un duplicado.`);
+      if (dupTimerRef.current) clearTimeout(dupTimerRef.current);
+      dupTimerRef.current = setTimeout(() => setDupWarning(""), 8000);
+    }
+    if (queue.length === 0) setLastSaved(record);
+    await afterFormResolved();
+  };
+
+  const performDelete = (id) => {
+    const rec = expenses.find((x) => x.id === id);
+    persistExpenses(expenses.filter((x) => x.id !== id));
+    setConfirmDelete(null); setUndoData(rec);
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = setTimeout(() => setUndoData(null), 6000);
+  };
+  const undoDelete = () => {
+    if (!undoData) return;
+    persistExpenses([undoData, ...expenses].sort((a, b) => (b.created || 0) - (a.created || 0)));
+    setUndoData(null);
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+  };
+
+  const exportBackup = () => {
+    const blob = new Blob([JSON.stringify({ expenses, carteras }, null, 2)], { type:"application/json" });
+    downloadBlob(blob, `backup_gastos_fave_${new Date().toISOString().slice(0,10)}.json`);
+  };
+  const handleRestoreFile = async (e) => {
+    const file = e.target.files?.[0]; e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const items = Array.isArray(parsed) ? parsed : parsed.expenses || [];
+      const walletItems = Array.isArray(parsed) ? [] : parsed.carteras || [];
+      const map = new Map(expenses.map((x) => [x.id, x]));
+      for (const it of items) { if (!it.id) it.id = uid(); map.set(it.id, it); }
+      persistExpenses(Array.from(map.values()).sort((a, b) => (b.created || 0) - (a.created || 0)));
+      if (walletItems.length) {
+        const wmap = new Map(carteras.map((x) => [x.id, x]));
+        for (const w of walletItems) { if (!w.id) w.id = uid(); wmap.set(w.id, w); }
+        persistCarteras(Array.from(wmap.values()));
+      }
+      setError("");
+    } catch (err) { console.error(err); setError("El fichero de copia de seguridad no es válido."); }
+  };
+
+  const exportXLSXFile = (list) => downloadBlob(new Blob([buildXLSX(list, carteras)], { type:"application/octet-stream" }), `gastos_fave_voleibol_${new Date().toISOString().slice(0,10)}.xlsx`);
+  const exportCSVFile = (list) => {
+    const carteraName = (id) => (carteras.find((c) => c.id === id) || {}).nombre || "";
+    const headers = ["Nº","Fecha","Proveedor","NIF","Concepto","Categoría","Evento","Financiación","Convocatoria","Forma de pago","Cartera","Base imponible","IVA %","IVA importe","Total","Núm. factura"];
+    const rows = list.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0)).map((x) => [
+      x.seq || "", x.fecha || "", x.proveedor || "", x.nif || "", (x.concepto || "").replace(/;/g, ","),
+      x.categoria || "", x.evento || "", x.financiacion || "", x.convocatoria || "", x.forma_pago || "", carteraName(x.carteraId),
+      x.base_imponible != null ? String(x.base_imponible).replace(".", ",") : "",
+      x.iva_porcentaje != null ? String(x.iva_porcentaje).replace(".", ",") : "",
+      x.iva_importe != null ? String(x.iva_importe).replace(".", ",") : "",
+      x.total != null ? String(x.total).replace(".", ",") : "", x.num_factura || "",
+    ]);
+    const csv = [headers, ...rows].map((r) => r.join(";")).join("\n");
+    downloadBlob(new Blob(["\ufeff" + csv], { type:"text/csv;charset=utf-8;" }), `gastos_fave_voleibol_${new Date().toISOString().slice(0,10)}.csv`);
+  };
+
+  const eventoOptions = ["Todos", ...Array.from(new Set(expenses.map((x) => x.evento).filter(Boolean)))];
+
+  let filtered = expenses;
+  if (filter !== "Todas") filtered = filtered.filter((x) => x.categoria === filter);
+  if (eventoFilter !== "Todos") filtered = filtered.filter((x) => (x.evento || "") === eventoFilter);
+  if (finFilter !== "Todas") filtered = filtered.filter((x) => x.financiacion === finFilter);
+  if (search.trim()) {
+    const q = search.trim().toLowerCase();
+    filtered = filtered.filter((x) => (x.proveedor||"").toLowerCase().includes(q) || (x.concepto||"").toLowerCase().includes(q) || (x.nif||"").toLowerCase().includes(q) || (x.num_factura||"").toLowerCase().includes(q));
+  }
+  if (dateFrom) { const df = new Date(dateFrom + "T00:00:00"); filtered = filtered.filter((x) => { const d = parseFechaDMY(x.fecha); return d && d >= df; }); }
+  if (dateTo) { const dt = new Date(dateTo + "T23:59:59"); filtered = filtered.filter((x) => { const d = parseFechaDMY(x.fecha); return d && d <= dt; }); }
+
+  const total = filtered.reduce((s, x) => s + (x.total || 0), 0);
+  const byCategory = CATEGORIES.map((c) => ({ cat:c, sum: expenses.filter((x) => x.categoria === c).reduce((s,x)=>s+(x.total||0),0), count: expenses.filter((x) => x.categoria === c).length })).filter((x) => x.count > 0);
+  const anyFilterActive = filter !== "Todas" || eventoFilter !== "Todos" || finFilter !== "Todas" || !!search.trim() || !!dateFrom || !!dateTo;
+  const clearFilters = () => { setFilter("Todas"); setEventoFilter("Todos"); setFinFilter("Todas"); setSearch(""); setDateFrom(""); setDateTo(""); };
+  const reportDescription = anyFilterActive ? `Filtro: ${filter !== "Todas" ? filter : "todas las categorías"}${eventoFilter !== "Todos" ? " · " + eventoFilter : ""}${finFilter !== "Todas" ? " · " + finFilter : ""}` : "Todos los gastos registrados";
+
+  // ---- Carteras helpers ----
+  const walletSpent = (w) => expenses.filter((x) => x.carteraId === w.id).reduce((s, x) => s + (x.total || 0), 0);
+  const openWallets = carteras.filter((w) => w.estado === "abierta");
+  const saveWallet = () => {
+    if (!walletForm.nombre.trim() || toNum(walletForm.importe) === null) { setError("Indica el nombre del responsable y el importe del anticipo."); return; }
+    const w = { id: walletForm.id || uid(), nombre: walletForm.nombre, evento: walletForm.evento || "", importe: toNum(walletForm.importe) || 0, fecha: walletForm.fecha || "", estado:"abierta" };
+    const without = carteras.filter((x) => x.id !== w.id);
+    persistCarteras([w, ...without]);
+    setWalletForm(null); setError("");
+  };
+  const closeWallet = (id) => {
+    persistCarteras(carteras.map((w) => (w.id === id ? { ...w, estado:"cerrada", closedAt: Date.now() } : w)));
+  };
+  const reopenWallet = (id) => { persistCarteras(carteras.map((w) => (w.id === id ? { ...w, estado:"abierta" } : w))); };
+  const deleteWallet = (id) => { persistCarteras(carteras.filter((w) => w.id !== id)); };
+
+  if (showReport) return <ReportView list={filtered} description={reportDescription} onClose={() => setShowReport(false)} />;
+  if (showLiquidacion) {
+    const w = carteras.find((x) => x.id === showLiquidacion);
+    if (w) return <LiquidacionView wallet={w} expensesAsignados={expenses.filter((x) => x.carteraId === w.id)} onClose={() => setShowLiquidacion(null)} />;
+  }
+
+  return (
+    <div className="shell">
+      <header style={{ background:"#1C2B22", color:"#EDEBE3", padding:"18px 16px 16px" }}>
+        <div style={{ maxWidth:640, margin:"0 auto" }}>
+          <div className="stamp" style={{ color:"#C1432E", borderColor:"#C1432E", marginBottom:8 }}>Federación Asturiana de Voleibol</div>
+          <h1 className="ledger-font" style={{ fontSize:23, fontWeight:700, margin:0 }}>Libro de gastos</h1>
+          <p style={{ fontSize:11.5, color:"#9FB0A0", margin:"4px 0 0", lineHeight:1.4 }}>
+            Los datos se guardan solo en este navegador (no se envían a ningún servidor). Haz copias de seguridad si vas a cambiar de dispositivo.
+          </p>
+        </div>
+      </header>
+
+      <main style={{ maxWidth:640, margin:"0 auto", padding:"18px 16px 24px" }}>
+
+        {tab === "scan" && (
+          <div>
+            <h2 className="ledger-font" style={{ fontSize:19, margin:"0 0 4px" }}>Escanear ticket</h2>
+            <p className="hint">Haz una foto del ticket o factura. El reconocimiento de texto se ejecuta en tu propio navegador (no se envía a ningún servidor) y rellenará los datos para que los revises antes de guardar.</p>
+            {!ocrReady && !form && <p className="hint" style={{ color:"#A6622B" }}>Preparando el lector de texto (la primera vez puede tardar unos segundos)…</p>}
+
+            {!form && !scanning && (
+              <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                <button onClick={() => fileInputRef.current?.click()} className="focus-ring"
+                  style={{ background:"#1C2B22", color:"#EDEBE3", border:"none", borderRadius:10, padding:"22px 16px", fontSize:18, fontWeight:700, cursor:"pointer" }}>
+                  📷 Hacer foto al ticket
+                </button>
+                <div style={{ display:"flex", gap:8 }}>
+                  <div style={{ flex:1 }}>
+                    <button onClick={() => batchInputRef.current?.click()} className="focus-ring"
+                      style={{ width:"100%", background:"#2F6B4F", color:"#EDEBE3", border:"none", borderRadius:8, padding:"12px 8px", fontSize:13.5, fontWeight:600, cursor:"pointer" }}>
+                      🗂️ Varias fotos a la vez
+                    </button>
+                    <p className="hint" style={{ marginTop:6 }}>Para cuando ya tengas hechas las fotos de varios tickets: te los iremos mostrando uno a uno para revisar.</p>
+                  </div>
+                </div>
+                <div>
+                  <button onClick={openManual} className="focus-ring" style={{ ...ghostBtn, width:"100%" }}>Añadir manualmente</button>
+                  <p className="hint" style={{ marginTop:6 }}>Si el ticket no se puede fotografiar o el lector falla, rellena los datos a mano.</p>
+                </div>
+                <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handleSingleCapture} style={{ display:"none" }} />
+                <input ref={batchInputRef} type="file" accept="image/*" multiple onChange={handleBatchSelect} style={{ display:"none" }} />
+              </div>
+            )}
+
+            {lastSaved && !form && (
+              <div className="card receipt" style={{ padding:16, marginTop:18, paddingBottom:22 }}>
+                <div style={{ fontSize:13, color:"#2F6B4F", fontWeight:700, marginBottom:6 }}>✓ Gasto guardado</div>
+                <div style={{ fontWeight:600 }}>{lastSaved.proveedor || "Sin proveedor"} · <span className="mono">{fmtEUR(lastSaved.total)}</span></div>
+                <div style={{ fontSize:12, color:"#7A7660", marginBottom:12 }}>{lastSaved.categoria}{lastSaved.evento ? " · " + lastSaved.evento : ""}</div>
+                <div style={{ display:"flex", gap:10 }}>
+                  <button onClick={() => setLastSaved(null)} className="focus-ring" style={primaryBtn}>Escanear otro</button>
+                  <button onClick={() => { setLastSaved(null); setTab("gastos"); }} className="focus-ring" style={ghostBtn}>Ver en Gastos</button>
+                </div>
+              </div>
+            )}
+
+            {scanning && (
+              <div className="card receipt" style={{ padding:16, marginTop:14, textAlign:"center", color:"#5A5640" }}>
+                {queueTotal > 0 && <div style={{ fontSize:12, color:"#7A7660", marginBottom:6 }}>Foto {queueTotal - queue.length} de {queueTotal}</div>}
+                {pendingPreview && <img src={pendingPreview} alt="" style={{ maxHeight:90, borderRadius:4, marginBottom:8 }} />}
+                <div style={{ fontSize:13 }}>Leyendo el texto del ticket…</div>
+              </div>
+            )}
+
+            {form && !scanning && (
+              <ExpenseForm form={form} setForm={setForm} editId={editId} error={error} queue={queue} queueTotal={queueTotal}
+                rotating={rotating} onRotate={rotateAndReread} onCalcIVA={calcIVA} onSave={saveForm} onDiscard={discardForm}
+                openWallets={openWallets} />
+            )}
+          </div>
+        )}
+
+        {tab === "gastos" && (
+          <div>
+            <h2 className="ledger-font" style={{ fontSize:19, margin:"0 0 4px" }}>Gastos</h2>
+            <p className="hint">Aquí están todos los gastos guardados en este navegador. Usa el buscador o los filtros para acotar por categoría, evento, financiación o fechas.</p>
+
+            {undoData && (
+              <div style={{ background:"#1C2B22", color:"#EDEBE3", borderRadius:8, padding:"10px 12px", marginBottom:14, display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:13 }}>
+                <span>Gasto eliminado.</span>
+                <button onClick={undoDelete} style={{ background:"none", border:"none", color:"#9FD6B5", fontWeight:700, cursor:"pointer", fontSize:13 }}>Deshacer</button>
+              </div>
+            )}
+            {dupWarning && <div style={{ background:"#FBEFE0", color:"#7A4A1E", borderRadius:8, padding:"10px 12px", marginBottom:14, fontSize:13 }}>⚠️ {dupWarning}</div>}
+
+            {form && editId && !scanning && (
+              <ExpenseForm form={form} setForm={setForm} editId={editId} error={error} queue={[]} queueTotal={0}
+                rotating={rotating} onRotate={rotateAndReread} onCalcIVA={calcIVA} onSave={saveForm} onDiscard={discardForm}
+                openWallets={openWallets} />
+            )}
+
+            {!form && expenses.length > 0 && (
+              <>
+                <input className="focus-ring" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar proveedor, concepto, NIF…" style={{ ...inputStyle, marginBottom:8 }} />
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:10 }}>
+                  <button onClick={() => setShowFilters((s) => !s)} style={{ ...linkBtn, fontSize:12.5 }}>{showFilters ? "Ocultar filtros ▴" : "Más filtros ▾"}</button>
+                  {anyFilterActive && <button onClick={clearFilters} style={{ ...linkBtn, fontSize:12.5, color:"#8A3A3A" }}>Limpiar filtros</button>}
+                </div>
+                {showFilters && (
+                  <div className="card" style={{ padding:12, marginBottom:14, display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                    <div style={{ gridColumn:"1 / -1" }}>
+                      <label style={labelStyle}>Evento / torneo</label>
+                      <select className="focus-ring" value={eventoFilter} onChange={(e) => setEventoFilter(e.target.value)} style={inputStyle}>
+                        {eventoOptions.map((ev) => <option key={ev} value={ev}>{ev}</option>)}
+                      </select>
+                    </div>
+                    <div style={{ gridColumn:"1 / -1" }}>
+                      <label style={labelStyle}>Financiación</label>
+                      <select className="focus-ring" value={finFilter} onChange={(e) => setFinFilter(e.target.value)} style={inputStyle}>
+                        <option value="Todas">Todas</option>
+                        {FINANCIACIONES.map((f) => <option key={f} value={f}>{f}</option>)}
+                      </select>
+                    </div>
+                    <div><label style={labelStyle}>Desde</label><input className="focus-ring" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={inputStyle} /></div>
+                    <div><label style={labelStyle}>Hasta</label><input className="focus-ring" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={inputStyle} /></div>
+                  </div>
+                )}
+                <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:14 }}>
+                  {["Todas", ...CATEGORIES].map((c) => (
+                    <button key={c} onClick={() => setFilter(c)} style={{
+                      fontSize:12, fontWeight:600, padding:"5px 10px", borderRadius:20,
+                      border:`1.5px solid ${c === "Todas" ? "#1C2B22" : CATEGORY_COLOR[c]}`,
+                      color: filter === c ? "#FBFAF6" : (c === "Todas" ? "#1C2B22" : CATEGORY_COLOR[c]),
+                      background: filter === c ? (c === "Todas" ? "#1C2B22" : CATEGORY_COLOR[c]) : "transparent", cursor:"pointer",
+                    }}>{c}</button>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {!loaded ? (
+              <p style={{ color:"#7A7660", fontSize:14 }}>Cargando…</p>
+            ) : filtered.length === 0 && !form ? (
+              <div style={{ textAlign:"center", padding:"40px 10px", color:"#7A7660" }}>
+                <p className="ledger-font" style={{ fontSize:16, marginBottom:4 }}>{expenses.length === 0 ? "Sin gastos todavía" : "Ningún gasto coincide con el filtro"}</p>
+                <p style={{ fontSize:13 }}>{expenses.length === 0 ? "Ve a la pestaña Escanear para registrar el primero." : "Prueba a limpiar los filtros."}</p>
+              </div>
+            ) : (
+              <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                {filtered.map((x) => (
+                  <div key={x.id} className="card receipt" style={{ padding:"14px 14px 18px", display:"flex", gap:12 }}>
+                    {x.thumb ? <img src={x.thumb} alt="" style={{ width:52, height:52, objectFit:"cover", borderRadius:4, border:"1px solid #D8D4C5", flexShrink:0 }} />
+                      : <div style={{ width:52, height:52, borderRadius:4, background:"#EDEBE3", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 }}>🧾</div>}
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
+                        <div style={{ minWidth:0 }}>
+                          <div style={{ fontWeight:600, fontSize:14, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                            {x.seq ? <span className="mono" style={{ color:"#A6A18C", fontWeight:500, marginRight:4 }}>#{String(x.seq).padStart(3,"0")}</span> : null}
+                            {x.proveedor || "Sin proveedor"}
+                          </div>
+                          <div style={{ fontSize:12, color:"#7A7660" }}>{x.fecha || "Sin fecha"}{x.evento ? ` · ${x.evento}` : ""}{x.dudoso && <span style={{ color:"#A6622B" }}> · revisar</span>}</div>
+                        </div>
+                        <div className="mono" style={{ fontWeight:700, fontSize:15, whiteSpace:"nowrap" }}>{fmtEUR(x.total)}</div>
+                      </div>
+                      <div style={{ marginTop:6, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                        <span className="stamp" style={{ color:CATEGORY_COLOR[x.categoria], borderColor:CATEGORY_COLOR[x.categoria] }}>{x.categoria}</span>
+                        <div style={{ display:"flex", gap:10 }}>
+                          <button onClick={() => openEdit(x)} style={linkBtn}>Editar</button>
+                          {confirmDelete === x.id ? <button onClick={() => performDelete(x.id)} style={{ ...linkBtn, color:"#8A3A3A" }}>¿Eliminar?</button>
+                            : <button onClick={() => setConfirmDelete(x.id)} style={{ ...linkBtn, color:"#7A7660" }}>Eliminar</button>}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {byCategory.length > 1 && !form && (
+              <div style={{ marginTop:24, borderTop:"1px solid #D8D4C5", paddingTop:14 }}>
+                <div className="ledger-font" style={{ fontSize:13, color:"#7A7660", marginBottom:8 }}>Por categoría (todos los gastos)</div>
+                {byCategory.map((b) => (
+                  <div key={b.cat} style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"3px 0" }}>
+                    <span style={{ color:CATEGORY_COLOR[b.cat] }}>{b.cat} <span style={{ color:"#A6A18C" }}>({b.count})</span></span>
+                    <span className="mono">{fmtEUR(b.sum)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {expenses.length > 0 && (
+              <div className="card" style={{ marginTop:18, padding:"12px 14px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <span style={{ fontSize:12, color:"#7A7660", textTransform:"uppercase", letterSpacing:".04em" }}>{anyFilterActive ? `Filtrado (${filtered.length})` : `Total (${filtered.length})`}</span>
+                <span className="mono" style={{ fontSize:18, fontWeight:700 }}>{fmtEUR(total)}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "carteras" && (
+          <div>
+            <h2 className="ledger-font" style={{ fontSize:19, margin:"0 0 4px" }}>Carteras (anticipos de caja fija)</h2>
+            <p className="hint">Crea una cartera cuando la directiva entregue un anticipo a un seleccionador que viaja con un equipo. Asigna a esa cartera los tickets de ese viaje para ver el saldo restante en todo momento; al volver, cierra la cartera para generar la liquidación del anticipo.</p>
+
+            {error && <div style={{ background:"#FBEAE6", color:"#8A3A3A", padding:"8px 10px", borderRadius:6, fontSize:13, marginBottom:12 }}>{error}</div>}
+
+            {!walletForm ? (
+              <button onClick={() => setWalletForm({ nombre:"", evento:"", importe:"", fecha:"" })} className="focus-ring" style={{ ...primaryBtn, width:"100%", marginBottom:16 }}>+ Nueva cartera</button>
+            ) : (
+              <div className="card" style={{ padding:16, marginBottom:18 }}>
+                <h3 className="ledger-font" style={{ fontSize:16, margin:"0 0 10px" }}>Nueva cartera</h3>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                  <Field label="Responsable / seleccionador" value={walletForm.nombre} onChange={(v) => setWalletForm({ ...walletForm, nombre:v })} full />
+                  <Field label="Expedición / evento" value={walletForm.evento} onChange={(v) => setWalletForm({ ...walletForm, evento:v })} full placeholder="Ej. CESA 2026" />
+                  <Field label="Importe del anticipo (€)" value={walletForm.importe} onChange={(v) => setWalletForm({ ...walletForm, importe:v })} mono />
+                  <Field label="Fecha de entrega" value={walletForm.fecha} onChange={(v) => setWalletForm({ ...walletForm, fecha:v })} placeholder="DD/MM/AAAA" />
+                </div>
+                <div style={{ display:"flex", gap:10, marginTop:14 }}>
+                  <button onClick={saveWallet} className="focus-ring" style={primaryBtn}>Crear cartera</button>
+                  <button onClick={() => { setWalletForm(null); setError(""); }} className="focus-ring" style={ghostBtn}>Cancelar</button>
+                </div>
+              </div>
+            )}
+
+            {carteras.length === 0 ? (
+              <p style={{ fontSize:13, color:"#7A7660" }}>No hay carteras creadas todavía.</p>
+            ) : (
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                {carteras.map((w) => {
+                  const gastado = walletSpent(w); const saldo = round2(w.importe - gastado);
+                  return (
+                    <div key={w.id} className="card" style={{ padding:14 }}>
+                      <div style={{ display:"flex", justifyContent:"space-between" }}>
+                        <div>
+                          <div style={{ fontWeight:700 }}>{w.nombre}</div>
+                          <div style={{ fontSize:12, color:"#7A7660" }}>{w.evento || "Sin evento"} · {w.fecha || "sin fecha"}</div>
+                        </div>
+                        <span className="stamp" style={{ color: w.estado === "abierta" ? "#2F6B4F" : "#7A7660", borderColor: w.estado === "abierta" ? "#2F6B4F" : "#7A7660" }}>{w.estado}</span>
+                      </div>
+                      <div style={{ display:"flex", justifyContent:"space-between", marginTop:10, fontSize:13 }}>
+                        <span>Anticipo: <span className="mono">{fmtEUR(w.importe)}</span></span>
+                        <span>Gastado: <span className="mono">{fmtEUR(gastado)}</span></span>
+                        <span style={{ fontWeight:700 }}>Saldo: <span className="mono">{fmtEUR(saldo)}</span></span>
+                      </div>
+                      <div style={{ display:"flex", gap:14, marginTop:10 }}>
+                        <button onClick={() => setShowLiquidacion(w.id)} style={linkBtn}>Ver liquidación</button>
+                        {w.estado === "abierta"
+                          ? <button onClick={() => closeWallet(w.id)} style={{ ...linkBtn, color:"#A6622B" }}>Cerrar cartera</button>
+                          : <button onClick={() => reopenWallet(w.id)} style={{ ...linkBtn, color:"#7A7660" }}>Reabrir</button>}
+                        <button onClick={() => deleteWallet(w.id)} style={{ ...linkBtn, color:"#8A3A3A" }}>Eliminar</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "informes" && (
+          <div>
+            <h2 className="ledger-font" style={{ fontSize:19, margin:"0 0 4px" }}>Informes y copias de seguridad</h2>
+            <p className="hint">Genera el informe oficial para justificar subvenciones, exporta el detalle a Excel o CSV, o haz una copia de seguridad de todos los datos guardados en este navegador.</p>
+
+            <div className="card" style={{ padding:14, marginBottom:14 }}>
+              <div style={{ fontWeight:700, marginBottom:4 }}>Informe de gastos (PDF)</div>
+              <p className="hint" style={{ marginBottom:10 }}>
+                Incluye desglose por financiación, declaración de certificación y firmas, listo para imprimir o guardar como PDF.
+                Se generará con los filtros activos en la pestaña Gastos {anyFilterActive ? `(${reportDescription})` : "(actualmente: sin filtrar, todos los gastos)"}.
+              </p>
+              <button onClick={() => setShowReport(true)} className="focus-ring" style={{ ...primaryBtn, width:"100%" }} disabled={expenses.length === 0}>Generar informe</button>
+            </div>
+
+            <div className="card" style={{ padding:14, marginBottom:14 }}>
+              <div style={{ fontWeight:700, marginBottom:4 }}>Exportar detalle</div>
+              <p className="hint" style={{ marginBottom:10 }}>Excel con hojas de detalle, resumen por categoría y resumen por financiación. CSV para sistemas más antiguos.</p>
+              <div style={{ display:"flex", gap:10 }}>
+                <button onClick={() => exportXLSXFile(filtered)} className="focus-ring" style={{ ...primaryBtn, flex:1, background:"#C1432E" }} disabled={expenses.length === 0}>Excel (.xlsx)</button>
+                <button onClick={() => exportCSVFile(filtered)} className="focus-ring" style={{ ...ghostBtn, flex:1 }} disabled={expenses.length === 0}>CSV</button>
+              </div>
+            </div>
+
+            <div className="card" style={{ padding:14 }}>
+              <div style={{ fontWeight:700, marginBottom:4 }}>Copia de seguridad</div>
+              <p className="hint" style={{ marginBottom:10 }}>Descarga todos tus gastos y carteras en un fichero. Guárdalo por si cambias de navegador o de dispositivo: los datos no se sincronizan solos.</p>
+              <div style={{ display:"flex", gap:10 }}>
+                <button onClick={exportBackup} className="focus-ring" style={{ ...ghostBtn, flex:1 }} disabled={expenses.length === 0 && carteras.length === 0}>↧ Exportar copia</button>
+                <button onClick={() => restoreInputRef.current?.click()} className="focus-ring" style={{ ...ghostBtn, flex:1 }}>↥ Restaurar</button>
+                <input ref={restoreInputRef} type="file" accept="application/json" onChange={handleRestoreFile} style={{ display:"none" }} />
+              </div>
+              {error && tab === "informes" && <div style={{ marginTop:10, background:"#FBEAE6", color:"#8A3A3A", padding:"8px 10px", borderRadius:6, fontSize:13 }}>{error}</div>}
+            </div>
+          </div>
+        )}
+      </main>
+
+      <nav className="tabbar">
+        {TABS.map((t) => (
+          <button key={t.key} className={"tabbtn" + (tab === t.key ? " active" : "")} onClick={() => { setTab(t.key); if (t.key !== "gastos") { setForm(null); setEditId(null); } }}>
+            <span className="ic">{t.icon}</span>{t.label}
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+function ExpenseForm({ form, setForm, editId, error, queue, queueTotal, rotating, onRotate, onCalcIVA, onSave, onDiscard, openWallets }){
+  return (
+    <div className="card receipt" style={{ padding:18, marginBottom:24, paddingBottom:26 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:12 }}>
+        <h2 className="ledger-font" style={{ fontSize:18, fontWeight:600, margin:0 }}>{editId ? "Editar gasto" : "Revisar antes de guardar"}</h2>
+        <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+          {queueTotal > 0 && <span style={{ fontSize:11, color:"#7A7660" }}>{queueTotal - queue.length}/{queueTotal}</span>}
+          {form.dudoso && <span className="stamp" style={{ color:"#A6622B", borderColor:"#A6622B" }}>Revisar</span>}
+        </div>
+      </div>
+
+      {form.thumb && (
+        <div style={{ marginBottom:14 }}>
+          <img src={form.thumb} alt="ticket" style={{ maxHeight:150, borderRadius:4, border:"1px solid #D8D4C5", display:"block", marginBottom:6 }} />
+          {form.base64 && <button onClick={onRotate} disabled={rotating} className="focus-ring" style={{ background:"none", border:"none", color:"#2F6B4F", fontSize:12, fontWeight:600, cursor:"pointer", padding:0 }}>
+            {rotating ? "Rotando y releyendo…" : "↻ La foto está torcida: rotar y releer"}
+          </button>}
+        </div>
+      )}
+
+      {error && <div style={{ background:"#FBEAE6", color:"#8A3A3A", padding:"8px 10px", borderRadius:6, fontSize:13, marginBottom:12 }}>{error}</div>}
+
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+        <Field label="Fecha" value={form.fecha} onChange={(v) => setForm({ ...form, fecha:v })} placeholder="DD/MM/AAAA" />
+        <div>
+          <label style={labelStyle}>Categoría</label>
+          <select className="focus-ring" value={form.categoria} onChange={(e) => setForm({ ...form, categoria:e.target.value })} style={inputStyle}>
+            {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <Field label="Evento / expedición (opcional)" value={form.evento} onChange={(v) => setForm({ ...form, evento:v })} placeholder="Ej. CESA 2026" full />
+        <div>
+          <label style={labelStyle}>Financiación</label>
+          <select className="focus-ring" value={form.financiacion} onChange={(e) => setForm({ ...form, financiacion:e.target.value })} style={inputStyle}>
+            {FINANCIACIONES.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+        </div>
+        <div>
+          <label style={labelStyle}>Forma de pago</label>
+          <select className="focus-ring" value={form.forma_pago} onChange={(e) => setForm({ ...form, forma_pago:e.target.value })} style={inputStyle}>
+            {FORMAS_PAGO.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+        </div>
+        <Field label="Convocatoria / ref. subvención (opcional)" value={form.convocatoria} onChange={(v) => setForm({ ...form, convocatoria:v })} full />
+        {openWallets && openWallets.length > 0 && (
+          <div style={{ gridColumn:"1 / -1" }}>
+            <label style={labelStyle}>Cartera (anticipo de caja)</label>
+            <select className="focus-ring" value={form.carteraId} onChange={(e) => setForm({ ...form, carteraId:e.target.value })} style={inputStyle}>
+              <option value="">— Sin cartera —</option>
+              {openWallets.map((w) => <option key={w.id} value={w.id}>{w.nombre} · {w.evento || "sin evento"}</option>)}
+            </select>
+          </div>
+        )}
+        <Field label="Proveedor" value={form.proveedor} onChange={(v) => setForm({ ...form, proveedor:v })} full />
+        <Field label="NIF / CIF" value={form.nif} onChange={(v) => setForm({ ...form, nif:v })} />
+        <Field label="Núm. factura" value={form.num_factura} onChange={(v) => setForm({ ...form, num_factura:v })} />
+        <Field label="Concepto" value={form.concepto} onChange={(v) => setForm({ ...form, concepto:v })} full />
+        <Field label="Base imponible (€)" value={form.base_imponible} onChange={(v) => setForm({ ...form, base_imponible:v })} mono />
+        <Field label="IVA (%)" value={form.iva_porcentaje} onChange={(v) => setForm({ ...form, iva_porcentaje:v })} mono />
+        <div style={{ gridColumn:"1 / -1" }}>
+          <button onClick={onCalcIVA} style={{ background:"none", border:"1px dashed #2F6B4F", color:"#2F6B4F", fontSize:12, fontWeight:600, cursor:"pointer", padding:"5px 9px", borderRadius:6 }}>🧮 Calcular IVA y total desde la base</button>
+        </div>
+        <Field label="IVA importe (€)" value={form.iva_importe} onChange={(v) => setForm({ ...form, iva_importe:v })} mono />
+        <Field label="Total (€)" value={form.total} onChange={(v) => setForm({ ...form, total:v })} mono bold />
+      </div>
+
+      <label style={{ display:"flex", alignItems:"center", gap:6, marginTop:12, fontSize:12, color:"#7A7660" }}>
+        <input type="checkbox" checked={!!form.dudoso} onChange={(e) => setForm({ ...form, dudoso:e.target.checked })} />
+        Marcar para revisar más adelante
+      </label>
+
+      <div style={{ display:"flex", gap:10, marginTop:16 }}>
+        <button onClick={onSave} className="focus-ring" style={{ ...primaryBtn, flex:1 }}>Guardar gasto</button>
+        <button onClick={onDiscard} className="focus-ring" style={ghostBtn}>{queue.length > 0 ? `Descartar (quedan ${queue.length})` : queueTotal > 0 ? "Descartar" : "Cancelar"}</button>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
